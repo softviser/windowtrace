@@ -38,6 +38,7 @@ class WindowTrace : Form
     delegate bool EnumProc(IntPtr hwnd, IntPtr lp);
 
     [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
+    [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr hook);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc proc, IntPtr lp);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
@@ -64,6 +65,8 @@ class WindowTrace : Form
     readonly List<ListViewItem> all = new List<ListViewItem>(); // every record regardless of the filter, newest first
     readonly Dictionary<IntPtr, ListViewItem> open = new Dictionary<IntPtr, ListViewItem>();
     WinEventProc proc; // must stay referenced, otherwise the GC collects the delegate and the hook crashes
+    ManagementEventWatcher watcher;
+    Timer poll;
 
     WindowTrace(bool admin, bool demo)
     {
@@ -169,8 +172,16 @@ class WindowTrace : Form
         EnumWindows(delegate(IntPtr h, IntPtr lp) { AddWindow(h, true); return true; }, IntPtr.Zero);
         proc = OnWinEvent;
         // 0x8001 DESTROY, 0x8002 SHOW, 0x8003 HIDE; flag 2 = skip our own process
-        SetWinEventHook(0x8001, 0x8003, IntPtr.Zero, proc, 0, 0, 2);
+        IntPtr hook = SetWinEventHook(0x8001, 0x8003, IntPtr.Zero, proc, 0, 0, 2);
         Load += delegate { StartProcessTrace(); }; // BeginInvoke needs the window handle
+        FormClosed += delegate
+        {
+            // messages are still pumped while the process shuts down; an event delivered then would call
+            // into a dead form and crash the process (0xC000041D)
+            UnhookWinEvent(hook);
+            if (poll != null) poll.Stop();
+            if (watcher != null) try { watcher.Stop(); } catch { }
+        };
     }
 
     void OnWinEvent(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
@@ -240,8 +251,8 @@ class WindowTrace : Form
     {
         try
         {
-            var w = new ManagementEventWatcher("SELECT ProcessID, ParentProcessID, ProcessName FROM Win32_ProcessStartTrace");
-            w.EventArrived += delegate(object s, EventArrivedEventArgs e)
+            watcher = new ManagementEventWatcher("SELECT ProcessID, ParentProcessID, ProcessName FROM Win32_ProcessStartTrace");
+            watcher.EventArrived += delegate(object s, EventArrivedEventArgs e)
             {
                 int pid = Convert.ToInt32(e.NewEvent["ProcessID"]), ppid = Convert.ToInt32(e.NewEvent["ParentProcessID"]);
                 PInfo p = Query(pid);
@@ -256,7 +267,7 @@ class WindowTrace : Form
                 }
                 ProcessStarted(p);
             };
-            w.Start();
+            watcher.Start();
         }
         catch { StartProcessPolling(); }
     }
@@ -267,16 +278,16 @@ class WindowTrace : Form
     {
         var known = new HashSet<int>();
         foreach (Process p in Process.GetProcesses()) { known.Add(p.Id); p.Dispose(); }
-        var t = new Timer();
-        t.Interval = 250;
-        t.Tick += delegate
+        poll = new Timer();
+        poll.Interval = 250;
+        poll.Tick += delegate
         {
             var now = new HashSet<int>();
             foreach (Process p in Process.GetProcesses()) { now.Add(p.Id); p.Dispose(); }
             foreach (int pid in now) if (!known.Contains(pid)) ProcessStarted(Query(pid));
             known = now;
         };
-        t.Start();
+        poll.Start();
     }
 
     void ProcessStarted(PInfo p) // called from the WMI thread or the UI thread
@@ -284,7 +295,9 @@ class WindowTrace : Form
         string time = DateTime.Now.ToString("HH:mm:ss.fff");
         PInfo parent;
         string chain = Chain(p, out parent);
-        BeginInvoke((MethodInvoker)delegate { AddRow(time, p, parent, chain, "(process started)", "", true); });
+        // the WMI thread can still deliver an event while the form is closing; unhandled there, it would kill the process
+        try { BeginInvoke((MethodInvoker)delegate { AddRow(time, p, parent, chain, "(process started)", "", true); }); }
+        catch (InvalidOperationException) { }
     }
 
     bool Match(ListViewItem it)
