@@ -9,6 +9,12 @@ process in the first place.
 It is a single small executable for Windows 10 and 11. It needs no installation, stores nothing and never
 goes online.
 
+## Download
+
+Get `WindowTrace.exe` from the [Releases](https://github.com/softviser/windowtrace/releases/latest) page and
+run it. The file is not code-signed, so SmartScreen may ask for confirmation the first time; the SHA-256
+of each build is in its release notes.
+
 ## What it shows
 
 Every row is either a window that appeared or a process that started:
@@ -82,8 +88,6 @@ checks that the window, its process and its launcher were recorded. The whole pr
 
 `tools\make-icon.ps1` redraws the icon and `tools\make-screenshots.ps1` retakes the screenshots from
 `WindowTrace.exe --demo`, which fills the list with made-up rows instead of reading the machine.
-
-Prebuilt binaries, when available, are on the [Releases](https://github.com/softviser/windowtrace/releases) page.
 
 ## How it works
 
